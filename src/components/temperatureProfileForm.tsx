@@ -6,6 +6,7 @@ import { z } from "zod";
 import { apiR } from "~/trpc/react";
 import TimezoneSelect, { allTimezones } from "react-timezone-select";
 import { Button } from "./ui/button";
+import { getTemperatureSchedule } from "~/lib/temperature-schedule";
 
 const temperatureProfileSchema = z.object({
   bedTime: z.string().regex(/^\d{2}:\d{2}$/, "Must be in HH:MM format"),
@@ -13,11 +14,26 @@ const temperatureProfileSchema = z.object({
   initialSleepLevel: z.number().min(-10).max(10),
   midStageSleepLevel: z.number().min(-10).max(10),
   finalSleepLevel: z.number().min(-10).max(10),
+  automaticFinalStage: z.boolean(),
+  finalStageStartTime: z.string().regex(/^\d{2}:\d{2}$/, "Must be in HH:MM format"),
   timezone: z.object({
     value: z.string(),
     altName: z.string().optional(),
     abbrev: z.string().optional(),
   }),
+}).superRefine((profile, ctx) => {
+  try {
+    getTemperatureSchedule({
+      ...profile,
+      finalStageStartTime: profile.automaticFinalStage ? null : profile.finalStageStartTime,
+    });
+  } catch (error) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["finalStageStartTime"],
+      message: error instanceof Error ? error.message : "Invalid temperature schedule.",
+    });
+  }
 });
 
 type TemperatureProfileForm = z.infer<typeof temperatureProfileSchema>;
@@ -45,12 +61,17 @@ export const TemperatureProfileForm: React.FC = () => {
       initialSleepLevel: 0,
       midStageSleepLevel: 0,
       finalSleepLevel: 0,
+      automaticFinalStage: true,
+      finalStageStartTime: "04:00",
       timezone: { value: "America/New_York"},
     },
   });
 
   const bedTime = watch("bedTime");
   const wakeupTime = watch("wakeupTime");
+  const automaticFinalStage = watch("automaticFinalStage");
+  const finalStageStartTime = watch("finalStageStartTime");
+  const timezone = watch("timezone");
 
   const [sleepInfo, setSleepInfo] = useState({
     duration: "",
@@ -69,45 +90,39 @@ export const TemperatureProfileForm: React.FC = () => {
       setValue("initialSleepLevel", profile.initialSleepLevel / 10);
       setValue("midStageSleepLevel", profile.midStageSleepLevel / 10);
       setValue("finalSleepLevel", profile.finalSleepLevel / 10);
+      setValue("automaticFinalStage", profile.finalStageStartTime == null);
+      setValue("finalStageStartTime", profile.finalStageStartTime?.slice(0, 5) ?? "04:00");
       setValue("timezone", { value: profile.timezoneTZ });
       setIsExistingProfile(true);
       setIsLoading(false);
     } else if (getUserTemperatureProfileQuery.isError) {
-      setIsExistingProfile(false);
+      if (getUserTemperatureProfileQuery.error.data?.code === "NOT_FOUND") {
+        setIsExistingProfile(false);
+      }
       setIsLoading(false);
     }
   }, [getUserTemperatureProfileQuery.isSuccess, getUserTemperatureProfileQuery.isError, getUserTemperatureProfileQuery.data, setValue, getUserTemperatureProfileQuery.error]);
 
   useEffect(() => {
-    if (bedTime && wakeupTime) {
-      const bedDate = new Date(`2000-01-01T${bedTime}:00`);
-      const wakeDate = new Date(`2000-01-01T${wakeupTime}:00`);
-
-      if (wakeDate <= bedDate) {
-        wakeDate.setDate(wakeDate.getDate() + 1);
-      }
-
-      const durationMs = wakeDate.getTime() - bedDate.getTime();
-      const hours = Math.floor(durationMs / (1000 * 60 * 60));
-      const minutes = Math.round((durationMs % (1000 * 60 * 60)) / (1000 * 60));
-
-      // Check if sleep duration is less than 4 hours
-      if (hours < 4 ) {
-        setSleepDurationError("Sleep duration must be at least 4 hours.");
-        setSleepInfo({ duration: "", midStageTime: "", finalStageTime: "" });
-      } else {
-        setSleepDurationError(null);
-        const midStageDate = new Date(bedDate.getTime() + 60 * 60 * 1000); // 1 hour after bedtime
-        const finalStageDate = new Date(wakeDate.getTime() - 2 * 60 * 60 * 1000); // 2 hours before wakeup
-
-        setSleepInfo({
-          duration: `${hours} hours ${minutes} minutes`,
-          midStageTime: midStageDate.toTimeString().slice(0, 5),
-          finalStageTime: finalStageDate.toTimeString().slice(0, 5),
-        });
-      }
+    try {
+      const schedule = getTemperatureSchedule({
+        bedTime,
+        wakeupTime,
+        finalStageStartTime: automaticFinalStage ? null : finalStageStartTime,
+      });
+      const hours = Math.floor(schedule.durationMinutes / 60);
+      const minutes = Math.floor(schedule.durationMinutes % 60);
+      setSleepDurationError(null);
+      setSleepInfo({
+        duration: `${hours} hours ${minutes} minutes`,
+        midStageTime: schedule.midStageTime,
+        finalStageTime: schedule.finalStageTime,
+      });
+    } catch (error) {
+      setSleepDurationError(error instanceof Error ? error.message : "Invalid temperature schedule.");
+      setSleepInfo({ duration: "", midStageTime: "", finalStageTime: "" });
     }
-  }, [bedTime, wakeupTime]);
+  }, [bedTime, wakeupTime, automaticFinalStage, finalStageStartTime]);
 
   const updateProfileMutation =
     apiR.user.updateUserTemperatureProfile.useMutation({
@@ -144,6 +159,7 @@ export const TemperatureProfileForm: React.FC = () => {
       initialSleepLevel: Math.round(data.initialSleepLevel * 10),
       midStageSleepLevel: Math.round(data.midStageSleepLevel * 10),
       finalSleepLevel: Math.round(data.finalSleepLevel * 10),
+      finalStageStartTime: data.automaticFinalStage ? null : formatTimeForAPI(data.finalStageStartTime),
       timezoneTZ: data.timezone.value,
     };
 
@@ -193,6 +209,19 @@ export const TemperatureProfileForm: React.FC = () => {
 
   if (isLoading) {
     return <div>Loading...</div>;
+  }
+
+  if (getUserTemperatureProfileQuery.isError && getUserTemperatureProfileQuery.error.data?.code !== "NOT_FOUND") {
+    return (
+      <div role="alert" className="mx-auto mt-8 w-full max-w-md rounded-lg bg-white p-6 text-gray-800 shadow-xl">
+        <h2 className="text-lg font-semibold">Your profile could not be loaded</h2>
+        <p className="mt-2 text-sm">{getUserTemperatureProfileQuery.error.message}</p>
+        <p className="mt-2 text-sm text-gray-600">Load your saved settings before making changes.</p>
+        <Button type="button" variant="outline" className="mt-4" onClick={() => void getUserTemperatureProfileQuery.refetch()} disabled={getUserTemperatureProfileQuery.isFetching}>
+          {getUserTemperatureProfileQuery.isFetching ? "Loading…" : "Retry loading profile"}
+        </Button>
+      </div>
+    );
   }
 
   return (
@@ -301,11 +330,62 @@ export const TemperatureProfileForm: React.FC = () => {
           control={control}
           info={`Starts at ${sleepInfo.midStageTime}`}
         />
+        <div className="space-y-3 rounded-md border border-indigo-100 bg-indigo-50 p-4">
+          <label htmlFor="finalStageStartTime" className="block text-sm font-semibold text-gray-800">
+            Final stage starts at
+          </label>
+          <Controller
+            name="finalStageStartTime"
+            control={control}
+            render={({ field }) => (
+              <input
+                {...field}
+                type="time"
+                id="finalStageStartTime"
+                value={automaticFinalStage ? sleepInfo.finalStageTime : field.value}
+                disabled={automaticFinalStage}
+                className="block w-full rounded-md border border-gray-300 bg-white px-3 py-2 text-gray-900 disabled:bg-gray-100 disabled:text-gray-600"
+                aria-describedby="final-stage-time-help"
+              />
+            )}
+          />
+          <Controller
+            name="automaticFinalStage"
+            control={control}
+            render={({ field }) => (
+              <label className="flex items-start gap-2 text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={field.value}
+                  onBlur={field.onBlur}
+                  ref={field.ref}
+                  name={field.name}
+                  onChange={(event) => {
+                    if (!event.target.checked && sleepInfo.finalStageTime) {
+                      setValue("finalStageStartTime", sleepInfo.finalStageTime);
+                    }
+                    field.onChange(event.target.checked);
+                    setSaveMessage(null);
+                  }}
+                  className="mt-1"
+                />
+                Use automatic start: two hours before wake-up
+              </label>
+            )}
+          />
+          <p id="final-stage-time-help" className="text-xs leading-relaxed text-indigo-900">
+            {automaticFinalStage
+              ? "Uncheck automatic start to choose a final-stage time independently of wake-up."
+              : "This time stays fixed when you change wake-up. Use automatic start to return to two hours before wake-up."}
+            {" "}All schedule times use {timezone.value}.
+          </p>
+          {errors.finalStageStartTime && <p className="text-sm text-red-600">{errors.finalStageStartTime.message}</p>}
+        </div>
         <SliderInput
           name="finalSleepLevel"
           label="Final Sleep Level"
           control={control}
-          info={`Starts at ${sleepInfo.finalStageTime}`}
+          info={sleepInfo.finalStageTime ? `Starts at ${sleepInfo.finalStageTime} and continues until wake-up at ${wakeupTime}` : undefined}
         />
 
         <div className="flex justify-between">

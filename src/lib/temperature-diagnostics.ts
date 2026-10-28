@@ -3,6 +3,7 @@ export type DiagnosticSource = "cron" | "profile-save" | "test";
 export interface DiagnosticProfile {
   bedTime: string;
   wakeupTime: string;
+  finalStageStartTime?: string | null;
   timezone: string;
   initialSleepLevel: number;
   midStageSleepLevel: number;

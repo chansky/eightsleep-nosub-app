@@ -176,6 +176,22 @@ export function createHarness(options = {}) {
             (row) => !matches(row, filter),
           );
         }
+        if (target === schema.userTemperatureProfile && kind === "insert") {
+          const existing = state.profiles.find(
+            (row) => row.users.email === operation.values.email,
+          );
+          if (!existing)
+            throw new Error(
+              "Test profile insert requires an existing account fixture",
+            );
+          const update = operation.conflict?.set ?? operation.values;
+          Object.assign(
+            existing.userTemperatureProfiles,
+            Object.fromEntries(
+              Object.entries(update).filter(([, value]) => value !== undefined),
+            ),
+          );
+        }
         return { rowCount: 1 };
       });
       return promise;

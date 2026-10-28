@@ -72,7 +72,7 @@ migration adds one table and two indexes without changing existing schedules.
 The history is populated by existing cron runs; **Refresh** only reads history.
 Make sure the external cron job calls the permanent production domain, not an old
 deployment URL. The app displays the latest 100 checks from the seven-day history.
-The scheduler's temperature decisions are unchanged. Completed batches return
+Completed batches return
 HTTP 200 even if an account fails, so recurring account errors do not disable
 checks for other accounts in external cron services. The response includes
 `success: false` and success/failure counts when any account fails; its history
@@ -91,6 +91,24 @@ a stopped cron or unavailable diagnostics storage.
 
 Run `npm test` for the mock-only diagnostic tests. They do not contact a mattress
 or production database.
+
+### Choosing when the final level starts
+
+The temperature profile can use a custom **Final stage start time**, independent
+of wakeup. For example, set the final level to `0` and its start time to `04:00`
+to request neutral temperature at the first scheduled check at or after 4 a.m.,
+while keeping a 6:35 a.m. wakeup. The mattress takes time to reach the target.
+
+Leaving the start time automatic retains the default of two hours before wakeup.
+Custom times must be at least one hour after bedtime and before wakeup, interpreted
+in the profile's timezone. The scheduler checks the final target throughout that
+stage, so a missed or failed transition can catch up on the next cron run. Its
+decisions use fresh status reads and compare the requested target, rather than
+waiting for the physical temperature to match.
+
+The additive `migrations/final-stage-start-time.sql` migration adds the nullable
+time field without changing existing profiles. The documented `db:push` build
+command also applies this schema update.
 
 ## Credits
 

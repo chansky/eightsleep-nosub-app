@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { apiR } from "~/trpc/react";
-import { type TemperatureDiagnostic } from "~/lib/temperature-diagnostics";
+import { type DiagnosticProfile, type TemperatureDiagnostic } from "~/lib/temperature-diagnostics";
+import { getTemperatureSchedule } from "~/lib/temperature-schedule";
 import { Button } from "./ui/button";
 
 function formatTime(value: string, timezone: string) {
@@ -40,6 +41,15 @@ function sourceLabel(source: TemperatureDiagnostic["source"]) {
 function level(value: number) {
   const display = value / 10;
   return display > 0 ? `+${display}` : String(display);
+}
+
+function finalStageLabel(profile: DiagnosticProfile) {
+  try {
+    const time = getTemperatureSchedule(profile).finalStageTime;
+    return `${time} (${profile.finalStageStartTime == null ? "automatic: two hours before wake-up" : "custom start"})`;
+  } catch {
+    return "Unavailable: recorded schedule is invalid";
+  }
 }
 
 function runSummary(run: TemperatureDiagnostic) {
@@ -95,6 +105,7 @@ function RunDetails({ run, now }: { run: TemperatureDiagnostic; now: number }) {
           <div><dt className="inline font-semibold">Run: </dt><dd className="inline break-all">{run.id}</dd></div>
           <div><dt className="inline font-semibold">Finished: </dt><dd className="inline">{run.finishedAt ? formatTime(run.finishedAt, run.profile.timezone) : "No finish recorded"}</dd></div>
           <div><dt className="inline font-semibold">Profile saved: </dt><dd className="inline">{formatTime(run.profile.updatedAt, run.profile.timezone)}</dd></div>
+          <div><dt className="inline font-semibold">Final stage: </dt><dd className="inline">{finalStageLabel(run.profile)}</dd></div>
         </dl>
         <details>
           <summary className="cursor-pointer font-semibold">Profile used for this check</summary>
@@ -188,6 +199,7 @@ export function TemperatureDiagnostics() {
           <div className="rounded-md bg-slate-50 p-3 text-sm">
             <p className="font-semibold">Profile used by latest check</p>
             <p className="mt-1">Bed {latest.profile.bedTime.slice(0, 5)} · Wake {latest.profile.wakeupTime.slice(0, 5)}</p>
+            <p className="mt-1">Final stage {finalStageLabel(latest.profile)}</p>
             <p className="text-xs text-slate-600">{latest.profile.timezone}</p>
             <dl className="mt-3 grid grid-cols-3 gap-2">
               {([
