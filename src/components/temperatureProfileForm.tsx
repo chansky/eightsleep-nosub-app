@@ -26,6 +26,8 @@ export const TemperatureProfileForm: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isExistingProfile, setIsExistingProfile] = useState(false);
   const [sleepDurationError, setSleepDurationError] = useState<string | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const utils = apiR.useUtils();
 
   const {
     register,
@@ -71,7 +73,6 @@ export const TemperatureProfileForm: React.FC = () => {
       setIsExistingProfile(true);
       setIsLoading(false);
     } else if (getUserTemperatureProfileQuery.isError) {
-      console.error("Failed to fetch temperature profile. Using default values.", getUserTemperatureProfileQuery.error);
       setIsExistingProfile(false);
       setIsLoading(false);
     }
@@ -110,28 +111,27 @@ export const TemperatureProfileForm: React.FC = () => {
 
   const updateProfileMutation =
     apiR.user.updateUserTemperatureProfile.useMutation({
-      onSuccess: () => {
-        console.log("Temperature profile updated successfully");
+      onSuccess: async (result) => {
+        setSaveMessage(`Profile saved for ${result.email}.`);
         setIsExistingProfile(true); // Update the state after successful creation/update
-      },
-      onError: (error) => {
-        console.error("Failed to update temperature profile:", error.message);
+        await Promise.all([
+          utils.user.getUserTemperatureProfile.invalidate(),
+          utils.user.getTemperatureDiagnostics.invalidate(),
+        ]);
       },
     });
 
   const deleteProfileMutation =
     apiR.user.deleteUserTemperatureProfile.useMutation({
       onSuccess: () => {
-        console.log("Temperature profile deleted successfully");
+        setSaveMessage(null);
         setIsExistingProfile(false);
         reset(); // Reset form to default values
-      },
-      onError: (error) => {
-        console.error("Failed to delete temperature profile:", error.message);
       },
     });
 
   const onSubmit = (data: TemperatureProfileForm) => {
+    setSaveMessage(null);
     if (sleepDurationError) {
       return; // Prevent submission if there's a sleep duration error
     }
@@ -146,8 +146,6 @@ export const TemperatureProfileForm: React.FC = () => {
       finalSleepLevel: Math.round(data.finalSleepLevel * 10),
       timezoneTZ: data.timezone.value,
     };
-
-    console.log('Data being sent to server:', mutationData);
 
     updateProfileMutation.mutate(mutationData);
   };
@@ -198,10 +196,15 @@ export const TemperatureProfileForm: React.FC = () => {
   }
 
   return (
-    <div className="mx-auto mt-8 max-w-md rounded-lg bg-white p-6 shadow-xl">
+    <div className="mx-auto mt-8 w-full max-w-md rounded-lg bg-white p-6 shadow-xl">
       <h2 className="mb-4 text-center text-2xl font-bold text-gray-800">
         {isExistingProfile ? "Update" : "Create"} Temperature Profile
       </h2>
+      {getUserTemperatureProfileQuery.data && (
+        <p className="mb-4 break-words rounded-md bg-indigo-50 p-3 text-sm text-indigo-900">
+          Editing schedule for <strong>{getUserTemperatureProfileQuery.data.email}</strong>
+        </p>
+      )}
       <form
         onSubmit={handleSubmit(onSubmit)}
         className="space-y-4 text-gray-800"
@@ -218,7 +221,7 @@ export const TemperatureProfileForm: React.FC = () => {
             control={control}
             render={({ field }) => (
               <TimezoneSelect
-                value={field.value}
+                value={field.value.value}
                 onChange={field.onChange}
                 timezones={{
                   ...allTimezones,
@@ -324,6 +327,11 @@ export const TemperatureProfileForm: React.FC = () => {
             </Button>
           )}
         </div>
+        {saveMessage && (
+          <p role="status" className="rounded-md bg-emerald-50 p-3 text-sm text-emerald-800">
+            {saveMessage}
+          </p>
+        )}
         {updateProfileMutation.isError && (
           <p className="mt-4 text-center text-sm text-red-600">
             Error updating profile. Please try again.

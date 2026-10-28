@@ -5,6 +5,7 @@ import { env } from "~/env";
 import { appRouter } from "~/server/api/root";
 import { createTRPCContext } from "~/server/api/trpc";
 
+export const maxDuration = 60;
 
 const handler = (req: NextRequest) =>
   fetchRequestHandler({
