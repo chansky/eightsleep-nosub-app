@@ -24,10 +24,11 @@ import {
   RAW_TO_FAHRENHEIT_MAP,
 } from "./constants";
 import { fetchWithAuth, getDeviceData } from "./eight";
+import { recordDiagnosticEvent } from "~/server/temperature-diagnostics";
 
-export async function getUserProfile(token: Token): Promise<UserProfile> {
+export async function getUserProfile(token: Token, options: RequestInit = {}): Promise<UserProfile> {
   const url = `${CLIENT_API_URL}/users/me`;
-  const data = await fetchWithAuth(url, token, UserProfileSchema);
+  const data = await fetchWithAuth(url, token, UserProfileSchema, options);
   return data.user;
 }
 
@@ -93,11 +94,17 @@ export async function setAwayMode(
 
 export async function getCurrentHeatingStatus(
   token: Token,
+  options: RequestInit = {},
 ): Promise<HeatingStatus> {
-  const userProfile = await getUserProfile(token);
+  const userProfile = await getUserProfile(token, options);
   const userSide = userProfile.currentDevice.side;
   const deviceId = userProfile.devices[0]!;
-  const deviceData = await getDeviceData(token, deviceId);
+  recordDiagnosticEvent('device.selected', {
+    side: userSide,
+    deviceCount: userProfile.devices.length,
+    selectedDeviceMatchesCurrent: deviceId === userProfile.currentDevice.id,
+  });
+  const deviceData = await getDeviceData(token, deviceId, options);
 
   if (userSide === "left") {
     return {

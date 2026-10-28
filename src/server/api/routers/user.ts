@@ -1,14 +1,14 @@
 import { z } from "zod";
 import { createTRPCRouter, publicProcedure } from "~/server/api/trpc";
 import { db } from "~/server/db";
-import { users, userTemperatureProfile } from "~/server/db/schema";
+import { temperatureDiagnostics, users, userTemperatureProfile } from "~/server/db/schema";
 import { cookies } from "next/headers";
 import {
   authenticate,
   obtainFreshAccessToken,
   AuthError,
 } from "~/server/eight/auth";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, gte } from "drizzle-orm";
 import { type Token } from "~/server/eight/types";
 import { TRPCError } from "@trpc/server";
 import { adjustTemperature } from "~/app/api/temperatureCron/route";
@@ -21,9 +21,19 @@ class DatabaseError extends Error {
   }
 }
 
+// Database errors can contain query parameters, including stored credentials.
+// Keep authentication and database logging to an explicit, safe classification.
+function logUserError(context: string, error: unknown) {
+  console.error(context, {
+    kind: error instanceof AuthError ? "auth"
+      : error instanceof TRPCError ? "rpc"
+      : error instanceof DatabaseError ? "database" : "unexpected",
+    status: error instanceof AuthError ? error.statusCode : undefined,
+  });
+}
+
 const checkAuthCookie = async (headers: Headers) => {
   const cookies = headers.get("cookie");
-  console.log("Checking cookies");
   if (!cookies) {
     throw new AuthError(`Auth request failed. No cookies found.`, 401);
   }
@@ -32,16 +42,15 @@ const checkAuthCookie = async (headers: Headers) => {
     .split("; ")
     .find((row) => row.startsWith("8slpAutht="))
     ?.split("=")[1];
-  console.log("Token:", token);
 
   if (!token) {
     throw new AuthError(`Auth request failed. No cookies found.`, 401);
   }
   let decoded;
   try {
-    decoded = jwt.verify(token, process.env.JWT_SECRET!) as {
-      email: string;
-    };
+    decoded = z.object({ email: z.string().email() }).parse(
+      jwt.verify(token, process.env.JWT_SECRET!),
+    );
   } catch {
     throw new AuthError(`Auth request failed. Invalid token.`, 401);
   }
@@ -100,13 +109,13 @@ export const userRouter = createTRPCRouter({
 
           return { loginRequired: false };
         } catch (error) {
-          console.error("Token renewal failed:", error);
+          logUserError("Token renewal failed", error);
           return { loginRequired: true };
         }
       }
       return { loginRequired: false };
     } catch (error) {
-      console.error("Error in checkLoginState:", error);
+      logUserError("Error in checkLoginState", error);
       throw new Error(
         "An unexpected error occurred while checking login state.",
       );
@@ -156,7 +165,7 @@ export const userRouter = createTRPCRouter({
           success: true,
         };
       } catch (error) {
-        console.error("Error in login process:", error);
+        logUserError("Error in login process", error);
         if (error instanceof AuthError) {
           throw new Error(`Authentication failed: ${error.message}`);
         } else if (error instanceof DatabaseError) {
@@ -183,7 +192,7 @@ export const userRouter = createTRPCRouter({
         success: true,
       };
     } catch (error) {
-      console.error("Error during logout:", error);
+      logUserError("Error during logout", error);
       throw new TRPCError({
         code: "INTERNAL_SERVER_ERROR",
         message: "An unexpected error occurred during logout.",
@@ -208,11 +217,45 @@ export const userRouter = createTRPCRouter({
 
       return profile;
     } catch (error) {
-      console.error("Error fetching user temperature profile:", error);
+      logUserError("Error fetching user temperature profile", error);
       throw new TRPCError({
         code: "INTERNAL_SERVER_ERROR",
         message:
           "An unexpected error occurred while fetching the temperature profile.",
+      });
+    }
+  }),
+
+  getTemperatureDiagnostics: publicProcedure.query(async ({ ctx }) => {
+    let email: string;
+    try {
+      email = (await checkAuthCookie(ctx.headers)).email;
+    } catch {
+      throw new TRPCError({
+        code: "UNAUTHORIZED",
+        message: "Please sign in again to view temperature history.",
+      });
+    }
+
+    try {
+      const cutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const rows = await db
+        .select({ diagnostic: temperatureDiagnostics.diagnostic })
+        .from(temperatureDiagnostics)
+        .where(and(
+          eq(temperatureDiagnostics.email, email),
+          gte(temperatureDiagnostics.startedAt, cutoff),
+        ))
+        .orderBy(desc(temperatureDiagnostics.startedAt))
+        // Bound the JSON response even when many requests/retries were recorded.
+        .limit(100);
+
+      return { email, runs: rows.map((row) => row.diagnostic) };
+    } catch (error) {
+      logUserError("Error fetching temperature diagnostics", error);
+      throw new TRPCError({
+        code: "INTERNAL_SERVER_ERROR",
+        message: "Temperature history could not be loaded. Try Refresh; if this continues, check the deployment logs and diagnostics database migration.",
       });
     }
   }),
@@ -241,7 +284,6 @@ export const userRouter = createTRPCRouter({
           timezoneTZ: input.timezoneTZ,
           updatedAt: new Date(),
         };
-        console.log("Updated profile:", updatedProfile);
 
         await db
           .insert(userTemperatureProfile)
@@ -260,11 +302,12 @@ export const userRouter = createTRPCRouter({
           })
           .execute();
 
-        await adjustTemperature();
+        console.info("Temperature profile saved", { email: decoded.email });
+        await adjustTemperature(undefined, "profile-save");
 
-        return { success: true };
+        return { success: true, email: decoded.email };
       } catch (error) {
-        console.error("Error updating user temperature profile:", error);
+        logUserError("Error updating user temperature profile", error);
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message:
@@ -296,7 +339,7 @@ export const userRouter = createTRPCRouter({
         message: "User temperature profile deleted successfully",
       };
     } catch (error) {
-      console.error("Error deleting user temperature profile:", error);
+      logUserError("Error deleting user temperature profile", error);
       if (error instanceof TRPCError) {
         throw error;
       }
@@ -343,7 +386,7 @@ async function saveUserToDatabase(email: string, authResult: Token) {
       })
       .execute();
   } catch (error) {
-    console.error("Database operation failed:", error);
+    logUserError("Database operation failed", error);
     throw new DatabaseError("Failed to save user token to database.");
   }
 }

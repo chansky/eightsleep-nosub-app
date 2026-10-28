@@ -39,7 +39,7 @@ In the following, I will explain how to self-host this webapp on Vercel so that 
     - Go to [cron-job.org](https://cron-job.org/en/) and set up a free account
     - Create a new "Cron Job"
     - Title can be anything
-    - URL: `https://YOUR_VERCEL_URL/api/temperatureCron` e.g. `https://eightsleep-nosub-app-efwfwfwf-aerotows-projects.vercel.app/api/temperatureCron`
+    - URL: `https://YOUR_PRODUCTION_DOMAIN/api/temperatureCron`, using the permanent production domain shown in Vercel (for example `https://your-project.vercel.app/api/temperatureCron`). A URL tied to one deployment keeps running that old version after upgrades.
     - Set it to every 30 minutes
     - Under the "Advanced" Tab add a "Header"
         - Key: `Authorization`
@@ -53,6 +53,44 @@ Enjoy! That's it!
 ## How to Upgrade from an older Version?
 
 Check the [Release Notes](https://github.com/aerotow/eightsleep-nosub-app/releases) to see what changed. I will include steps you have to do there to upgrade. After you have read the notes there and made potential changes, make sure to go to your GitHub fork and sync to the latest commit of this repository. It's just one click at the top.
+
+### Temperature diagnostics
+
+The signed-in app includes **Temperature history** for the current account. Each
+scheduled check records the saved profile, timezone and transition windows, reported
+current and target levels, decisions, API status codes, token-refresh outcomes, and
+an immediate readback after a command. A successful API response does not prove the
+bed has physically reached the requested temperature. Each bed partner sees only
+their own history, and the signed-in account is shown above the profile.
+
+Diagnostics are retained for seven days in `8slp_temperatureDiagnostics`. Deployments
+using the documented `npm run build && npm run db:push` build command create this
+additional table from the schema. For deployments with a separate migration process,
+apply `migrations/temperature-diagnostics.sql` before enabling the updated app. The
+migration adds one table and two indexes without changing existing schedules.
+
+The history is populated by existing cron runs; **Refresh** only reads history.
+Make sure the external cron job calls the permanent production domain, not an old
+deployment URL. The app displays the latest 100 checks from the seven-day history.
+The scheduler's temperature decisions are unchanged. Completed batches return
+HTTP 200 even if an account fails, so recurring account errors do not disable
+checks for other accounts in external cron services. The response includes
+`success: false` and success/failure counts when any account fails; its history
+records the failure details. Unexpected batch failures still return HTTP 500,
+and unauthorized cron requests return HTTP 401. Diagnostic-storage failures are
+reported in Vercel logs and do not prevent temperature control. Tokens, passwords,
+authorization headers, raw API bodies and exception messages are excluded from
+these diagnostics.
+
+To investigate a missed transition, expand a scheduled check near the transition
+and inspect its summary and events. HTTP 401 indicates rejected authentication;
+signing into the Nosub app again for that account renews its stored credentials.
+An `Incomplete` run started but did not record a finish, which can indicate a
+timeout or a failure saving the result. Absence of recent history can also indicate
+a stopped cron or unavailable diagnostics storage.
+
+Run `npm test` for the mock-only diagnostic tests. They do not contact a mattress
+or production database.
 
 ## Credits
 

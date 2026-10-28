@@ -1,5 +1,6 @@
 import { AUTH_URL, DEFAULT_AUTH_HEADERS, KNOWN_CLIENT_ID, KNOWN_CLIENT_SECRET } from './constants';
-import { EightTokenSchema, TokenResponse, type Token } from './types';
+import { EightTokenSchema, type TokenResponse, type Token } from './types';
+import { describeDiagnosticError, recordDiagnosticEvent } from '~/server/temperature-diagnostics';
 
 export class AuthError extends Error {
   constructor(message: string, public statusCode?: number) {
@@ -16,11 +17,18 @@ export class ValidationError extends Error {
 }
 
 async function makeAuthRequest(data: Record<string, string>): Promise<TokenResponse> {
+  const startedAt = Date.now();
+  const operation = data.grant_type === 'refresh_token' ? 'refresh' : 'login';
+  recordDiagnosticEvent('auth.request', { operation });
   try {
     const response = await fetch(AUTH_URL, {
       method: 'POST',
       headers: DEFAULT_AUTH_HEADERS,
       body: JSON.stringify(data),
+    });
+
+    recordDiagnosticEvent('auth.response', {
+      operation, status: response.status, ok: response.ok, durationMs: Date.now() - startedAt,
     });
 
     if (!response.ok) {
@@ -32,10 +40,13 @@ async function makeAuthRequest(data: Record<string, string>): Promise<TokenRespo
 
     return validatedJson;
   } catch (error) {
+    recordDiagnosticEvent('auth.failure', {
+      operation, durationMs: Date.now() - startedAt, ...describeDiagnosticError(error),
+    });
     if (error instanceof AuthError) {
       throw error;
     } else if (error instanceof Error) {
-      throw new ValidationError(`Failed to validate response: ${error.message}`);
+      throw new ValidationError('Eight Sleep authentication response could not be read or validated');
     } else {
       throw new AuthError("An unexpected error occurred during authentication");
     }
@@ -65,9 +76,9 @@ export async function authenticate(email: string, password: string): Promise<Tok
   } catch (error) {
     if (error instanceof AuthError) {
       if (error.statusCode === 401) {
-        throw new AuthError("Invalid email or password");
+        throw new AuthError("Invalid email or password", error.statusCode);
       } else {
-        throw new AuthError(`Authentication failed: ${error.message}`);
+        throw new AuthError(`Authentication failed: ${error.message}`, error.statusCode);
       }
     } else if (error instanceof ValidationError) {
       throw new AuthError(`Authentication failed: ${error.message}`);
@@ -96,9 +107,9 @@ export async function obtainFreshAccessToken(refreshToken: string, existingUserI
   } catch (error) {
     if (error instanceof AuthError) {
       if (error.statusCode === 401) {
-        throw new AuthError("Invalid or expired refresh token");
+        throw new AuthError("Invalid or expired refresh token", error.statusCode);
       } else {
-        throw new AuthError(`Token refresh failed: ${JSON.stringify(error)}`);
+        throw new AuthError(`Token refresh failed (HTTP ${error.statusCode ?? 'unknown'})`, error.statusCode);
       }
     } else if (error instanceof ValidationError) {
       throw new AuthError(`Token refresh failed: ${error.message}`);

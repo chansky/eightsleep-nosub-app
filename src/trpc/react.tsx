@@ -46,6 +46,9 @@ export function TRPCReactProvider(props: { children: React.ReactNode }) {
           enabled: (op) =>
             process.env.NODE_ENV === "development" ||
             (op.direction === "down" && op.result instanceof Error),
+          // Request inputs can contain passwords; responses can contain tokens.
+          logger: ({ direction, path, type }) =>
+            console.info("[tRPC]", { direction, path, type }),
         }),
         httpBatchLink({
           transformer: SuperJSON,
