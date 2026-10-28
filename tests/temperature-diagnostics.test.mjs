@@ -134,22 +134,22 @@ test("testTime simulates a transition without token refresh, temperature calls, 
   );
 });
 
-test("a missed final transition explicitly records why -30 was retained", async () => {
+test("a missed automatic final transition catches up and records the requested level", async () => {
   const harness = createHarness({
     now: "2026-10-27T05:00:10-07:00",
     profiles: [profile("sleeper@example.test", { wakeupTime: "06:35:00" })],
   });
   await harness.load("~/app/api/temperatureCron/route").GET(harness.request());
-  assert.equal(harness.state.requests.length, 0);
+  assert.equal(harness.state.requests.length, 1);
   const row = harness.state.diagnostics[0];
   const evaluated = eventsFor(row, "schedule-evaluation")[0].details;
   assert.equal(evaluated.currentSleepStage, "final");
   assert.equal(evaluated.withinWindow.finalStage, false);
   assert.ok(evaluated.minutesFromBoundary.finalStage > 25);
-  const skipped = eventsFor(row, "temperature-change-skipped")[0].details;
-  assert.equal(skipped.reason, "missed-final-window");
-  assert.equal(skipped.currentLevel, -30);
-  assert.equal(skipped.configuredFinalLevel, 0);
+  const selected = eventsFor(row, "command-stage-selected")[0].details;
+  assert.equal(selected.selectedCommandStage, "final");
+  assert.equal(selected.currentLevel, -30);
+  assert.equal(selected.targetLevel, 0);
 
   const alreadyCommanded = createHarness({
     now: "2026-10-27T05:00:10-07:00",
@@ -164,12 +164,11 @@ test("a missed final transition explicitly records why -30 was retained", async 
     .load("~/app/api/temperatureCron/route")
     .GET(alreadyCommanded.request());
   assert.equal(
-    eventsFor(
-      alreadyCommanded.state.diagnostics[0],
-      "temperature-change-skipped",
-    )[0].details.reason,
-    "outside-window",
+    eventsFor(alreadyCommanded.state.diagnostics[0], "set-level-skipped")[0]
+      .details.reason,
+    "target-already-matches",
   );
+  assert.equal(alreadyCommanded.state.requests.length, 0);
 });
 
 test("unavailable diagnostic storage cannot prevent normal temperature control or expose database error contents", async () => {

@@ -13,6 +13,7 @@ import { type Token } from "~/server/eight/types";
 import { TRPCError } from "@trpc/server";
 import { adjustTemperature } from "~/app/api/temperatureCron/route";
 import jwt from "jsonwebtoken";
+import { getTemperatureSchedule } from "~/lib/temperature-schedule";
 
 class DatabaseError extends Error {
   constructor(message: string) {
@@ -218,6 +219,10 @@ export const userRouter = createTRPCRouter({
       return profile;
     } catch (error) {
       logUserError("Error fetching user temperature profile", error);
+      if (error instanceof TRPCError) throw error;
+      if (error instanceof AuthError) {
+        throw new TRPCError({ code: "UNAUTHORIZED", message: "Please sign in again to edit your temperature profile." });
+      }
       throw new TRPCError({
         code: "INTERNAL_SERVER_ERROR",
         message:
@@ -268,12 +273,31 @@ export const userRouter = createTRPCRouter({
         initialSleepLevel: z.number().int().min(-100).max(100),
         midStageSleepLevel: z.number().int().min(-100).max(100),
         finalSleepLevel: z.number().int().min(-100).max(100),
+        finalStageStartTime: z.string().time().nullable().optional(),
         timezoneTZ: z.string().max(50),
       }),
     )
     .mutation(async ({ input, ctx }) => {
       try {
         const decoded = await checkAuthCookie(ctx.headers);
+        // Older clients omit this field; preserve their existing override rather
+        // than resetting it when they save the rest of their profile.
+        const existingProfile = input.finalStageStartTime === undefined
+          ? await db.query.userTemperatureProfile.findFirst({
+              where: eq(userTemperatureProfile.email, decoded.email),
+            })
+          : undefined;
+        const finalStageStartTime = input.finalStageStartTime === undefined
+          ? existingProfile?.finalStageStartTime ?? null
+          : input.finalStageStartTime;
+        try {
+          getTemperatureSchedule({ ...input, finalStageStartTime });
+        } catch (error) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: error instanceof Error ? error.message : "Invalid temperature schedule.",
+          });
+        }
         const updatedProfile = {
           email: decoded.email,
           bedTime: input.bedTime,
@@ -281,6 +305,7 @@ export const userRouter = createTRPCRouter({
           initialSleepLevel: input.initialSleepLevel,
           midStageSleepLevel: input.midStageSleepLevel,
           finalSleepLevel: input.finalSleepLevel,
+          finalStageStartTime,
           timezoneTZ: input.timezoneTZ,
           updatedAt: new Date(),
         };
@@ -296,6 +321,7 @@ export const userRouter = createTRPCRouter({
               initialSleepLevel: input.initialSleepLevel,
               midStageSleepLevel: input.midStageSleepLevel,
               finalSleepLevel: input.finalSleepLevel,
+              ...(input.finalStageStartTime !== undefined ? { finalStageStartTime } : {}),
               timezoneTZ: input.timezoneTZ,
               updatedAt: new Date(),
             },
@@ -308,6 +334,7 @@ export const userRouter = createTRPCRouter({
         return { success: true, email: decoded.email };
       } catch (error) {
         logUserError("Error updating user temperature profile", error);
+        if (error instanceof TRPCError) throw error;
         throw new TRPCError({
           code: "INTERNAL_SERVER_ERROR",
           message:

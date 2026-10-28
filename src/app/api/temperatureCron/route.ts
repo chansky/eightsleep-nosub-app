@@ -7,6 +7,7 @@ import { type HeatingStatus, type Token } from "~/server/eight/types";
 import { setHeatingLevel, turnOnSide, turnOffSide } from "~/server/eight/eight";
 import { getCurrentHeatingStatus } from "~/server/eight/user";
 import type { DiagnosticSource } from "~/lib/temperature-diagnostics";
+import { getTemperatureSchedule } from "~/lib/temperature-schedule";
 import {
   describeDiagnosticError,
   pruneTemperatureDiagnostics,
@@ -90,7 +91,13 @@ function createSleepCycle(
   baseDate: Date,
   bedTimeStr: string,
   wakeupTimeStr: string,
+  finalStageStartTime?: string | null,
 ): SleepCycle {
+  const schedule = getTemperatureSchedule({
+    bedTime: bedTimeStr,
+    wakeupTime: wakeupTimeStr,
+    finalStageStartTime,
+  });
   const preHeatingTime = createDateWithTime(baseDate, bedTimeStr);
   preHeatingTime.setHours(preHeatingTime.getHours() - 1); // Set pre-heating to 1 hour before bedtime
 
@@ -103,32 +110,35 @@ function createSleepCycle(
   }
 
   const midStageTime = new Date(bedTime.getTime() + 60 * 60 * 1000);
-  const finalStageTime = new Date(wakeupTime.getTime() - 2 * 60 * 60 * 1000);
+  let finalStageTime = createDateWithTime(baseDate, schedule.finalStageTime);
+  if (finalStageTime < bedTime) {
+    finalStageTime = addDays(finalStageTime, 1);
+  }
 
   return { preHeatingTime, bedTime, midStageTime, finalStageTime, wakeupTime };
 }
 
-function adjustTimeToCurrentCycle(
-  cycleStart: Date,
+function adjustToCurrentCycle(
+  cycle: SleepCycle,
   currentTime: Date,
-  timeInCycle: Date,
-): Date {
-  let adjustedTime = new Date(timeInCycle);
-
-  // If the time in the cycle is before the cycle start, it means it's on the next day
-  if (timeInCycle < cycleStart) {
-    adjustedTime = addDays(adjustedTime, 1);
-  }
-
-  // If the adjusted time is in the future relative to the current time, move it back by one day
-  if (
-    adjustedTime > currentTime &&
-    adjustedTime.getTime() - currentTime.getTime() > 12 * 60 * 60 * 1000
-  ) {
-    adjustedTime = addDays(adjustedTime, -1);
-  }
-
-  return adjustedTime;
+): SleepCycle {
+  // Keep every boundary in the same night. Select the latest cycle whose
+  // preheat window has begun, including the existing 15-minute early window.
+  // Before the next preheat window, the previous wake time still governs off.
+  const windowEnd = new Date(currentTime.getTime() + 15 * 60 * 1000);
+  const dayOffset =
+    cycle.preHeatingTime > windowEnd
+      ? -1
+      : addDays(cycle.preHeatingTime, 1) <= windowEnd
+        ? 1
+        : 0;
+  return {
+    preHeatingTime: addDays(cycle.preHeatingTime, dayOffset),
+    bedTime: addDays(cycle.bedTime, dayOffset),
+    midStageTime: addDays(cycle.midStageTime, dayOffset),
+    finalStageTime: addDays(cycle.finalStageTime, dayOffset),
+    wakeupTime: addDays(cycle.wakeupTime, dayOffset),
+  };
 }
 
 interface TestMode {
@@ -180,6 +190,7 @@ export async function adjustTemperature(
             profile: {
               bedTime: savedProfile.bedTime,
               wakeupTime: savedProfile.wakeupTime,
+              finalStageStartTime: savedProfile.finalStageStartTime ?? null,
               timezone: savedProfile.timezoneTZ,
               initialSleepLevel: savedProfile.initialSleepLevel,
               midStageSleepLevel: savedProfile.midStageSleepLevel,
@@ -263,37 +274,10 @@ export async function adjustTemperature(
               userNow,
               userTemperatureProfile.bedTime,
               userTemperatureProfile.wakeupTime,
+              userTemperatureProfile.finalStageStartTime,
             );
 
-            // Adjust all times in the cycle to the current day
-            const cycleStart = sleepCycle.preHeatingTime;
-            const adjustedCycle: SleepCycle = {
-              preHeatingTime: adjustTimeToCurrentCycle(
-                cycleStart,
-                userNow,
-                sleepCycle.preHeatingTime,
-              ),
-              bedTime: adjustTimeToCurrentCycle(
-                cycleStart,
-                userNow,
-                sleepCycle.bedTime,
-              ),
-              midStageTime: adjustTimeToCurrentCycle(
-                cycleStart,
-                userNow,
-                sleepCycle.midStageTime,
-              ),
-              finalStageTime: adjustTimeToCurrentCycle(
-                cycleStart,
-                userNow,
-                sleepCycle.finalStageTime,
-              ),
-              wakeupTime: adjustTimeToCurrentCycle(
-                cycleStart,
-                userNow,
-                sleepCycle.wakeupTime,
-              ),
-            };
+            const adjustedCycle = adjustToCurrentCycle(sleepCycle, userNow);
 
             recordDiagnosticEvent("adjusted-boundaries", {
               preHeating: localDateTime(adjustedCycle.preHeatingTime),
@@ -314,7 +298,7 @@ export async function adjustTemperature(
               };
             } else {
               heatingStatus = await retryApiCall("get-heating-status", () =>
-                getCurrentHeatingStatus(token),
+                getCurrentHeatingStatus(token, { cache: "no-store" }),
               );
             }
             recordDiagnosticEvent("heating-status-before", {
@@ -348,9 +332,15 @@ export async function adjustTemperature(
               15,
             );
 
-            // Determine current sleep stage
+            const isFinalStageActive =
+              userNow >= adjustedCycle.finalStageTime &&
+              userNow < adjustedCycle.wakeupTime;
+
+            // Final has priority when an explicit start coincides with mid-stage.
             let currentSleepStage = "outside sleep cycle";
-            if (
+            if (isFinalStageActive) {
+              currentSleepStage = "final";
+            } else if (
               userNow >= adjustedCycle.preHeatingTime &&
               userNow < adjustedCycle.bedTime
             ) {
@@ -365,17 +355,14 @@ export async function adjustTemperature(
               userNow < adjustedCycle.finalStageTime
             ) {
               currentSleepStage = "mid";
-            } else if (
-              userNow >= adjustedCycle.finalStageTime &&
-              userNow < adjustedCycle.wakeupTime
-            ) {
-              currentSleepStage = "final";
             }
 
             const minutesFrom = (boundary: Date) =>
               Math.round((userNow.getTime() - boundary.getTime()) / 600) / 100;
             recordDiagnosticEvent("schedule-evaluation", {
               currentSleepStage,
+              finalStageActive: isFinalStageActive,
+              finalStageContinuesOutsideTransitionWindow: true,
               windowMinutes: 15,
               windowIsSymmetric: true,
               minutesFromBoundary: {
@@ -398,6 +385,7 @@ export async function adjustTemperature(
             let commandedLevel: number | null = null;
             try {
               if (
+                isFinalStageActive ||
                 isNearPreHeating ||
                 isNearBedTime ||
                 isNearMidStage ||
@@ -407,7 +395,10 @@ export async function adjustTemperature(
                 let targetLevel: number;
                 let sleepStage: string;
 
-                if (
+                if (isFinalStageActive) {
+                  targetLevel = userTemperatureProfile.finalSleepLevel;
+                  sleepStage = "final";
+                } else if (
                   isNearPreHeating ||
                   (isNearBedTime && userNow < adjustedCycle.bedTime)
                 ) {
@@ -436,7 +427,13 @@ export async function adjustTemperature(
                   targetLevel,
                   currentLevel: heatingStatus.heatingLevel,
                   reportedTargetLevel: heatingStatus.targetHeatingLevel,
-                  comparisonField: "currentLevel",
+                  comparisonField:
+                    sleepStage === "final"
+                      ? "reportedTargetLevel"
+                      : "currentLevel",
+                  selectionReason: isFinalStageActive
+                    ? "final-stage-active"
+                    : "transition-window",
                 });
 
                 if (!heatingStatus.isHeating) {
@@ -455,7 +452,15 @@ export async function adjustTemperature(
                     reason: "already-on",
                   });
                 }
-                if (heatingStatus.heatingLevel !== targetLevel) {
+                // Compare the commanded target during final stage: current water
+                // temperature may still be catching up. Turning on may reset the
+                // target, so reassert it even when the pre-write target matched.
+                const shouldSetLevel =
+                  sleepStage === "final"
+                    ? !heatingStatus.isHeating ||
+                      heatingStatus.targetHeatingLevel !== targetLevel
+                    : heatingStatus.heatingLevel !== targetLevel;
+                if (shouldSetLevel) {
                   if (testMode?.enabled) {
                     recordDiagnosticEvent("would-set-level", { targetLevel });
                   } else {
@@ -477,7 +482,10 @@ export async function adjustTemperature(
                   }
                 } else {
                   recordDiagnosticEvent("set-level-skipped", {
-                    reason: "level-already-matches",
+                    reason:
+                      sleepStage === "final"
+                        ? "target-already-matches"
+                        : "level-already-matches",
                     targetLevel,
                     currentLevel: heatingStatus.heatingLevel,
                     reportedTargetLevel: heatingStatus.targetHeatingLevel,
@@ -504,17 +512,8 @@ export async function adjustTemperature(
                   recordDiagnosticEvent("turn-off-accepted", {});
                 }
               } else {
-                const missedFinalWindow =
-                  currentSleepStage === "final" &&
-                  minutesFrom(adjustedCycle.finalStageTime) > 15 &&
-                  heatingStatus.heatingLevel !==
-                    userTemperatureProfile.finalSleepLevel &&
-                  heatingStatus.targetHeatingLevel !==
-                    userTemperatureProfile.finalSleepLevel;
                 recordDiagnosticEvent("temperature-change-skipped", {
-                  reason: missedFinalWindow
-                    ? "missed-final-window"
-                    : "outside-window",
+                  reason: "outside-window",
                   currentSleepStage,
                   selectedCommandStage: null,
                   currentLevel: heatingStatus.heatingLevel,
